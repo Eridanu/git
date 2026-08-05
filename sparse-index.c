@@ -1,5 +1,9 @@
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
 #include "git-compat-util.h"
 #include "environment.h"
+#include "ewah/ewok.h"
 #include "gettext.h"
 #include "name-hash.h"
 #include "read-cache-ll.h"
@@ -12,6 +16,25 @@
 #include "config.h"
 #include "dir.h"
 #include "fsmonitor-ll.h"
+#include "advice.h"
+
+/**
+ * This global is used by expand_index() to determine if we should give the
+ * advice for advice.sparseIndexExpanded when expanding a sparse index to a full
+ * one. However, this is sometimes done on purpose, such as in the sparse-checkout
+ * builtin, even when index.sparse=false. This may be disabled in
+ * convert_to_sparse() or by commands that know they will lead to a full
+ * expansion, but this message is not actionable.
+ */
+int give_advice_on_expansion = 1;
+#define ADVICE_MSG \
+	"The sparse index is expanding to a full index, a slow operation.\n"   \
+	"Your working directory likely has contents that are outside of\n"     \
+	"your sparse-checkout patterns. Use 'git sparse-checkout list' to\n"   \
+	"see your sparse-checkout definition and compare it to your working\n" \
+	"directory contents. Cleaning up any merge conflicts or staged\n"      \
+	"changes before running 'git sparse-checkout clean' or 'git\n"         \
+	"sparse-checkout reapply' may assist in this cleanup."
 
 struct modify_index_context {
 	struct index_state *write;
@@ -129,7 +152,9 @@ static int index_has_unmerged_entries(struct index_state *istate)
 
 int is_sparse_index_allowed(struct index_state *istate, int flags)
 {
-	if (!core_apply_sparse_checkout || !core_sparse_checkout_cone)
+	struct repo_config_values *cfg = repo_config_values(the_repository);
+
+	if (!cfg->apply_sparse_checkout || !cfg->core_sparse_checkout_cone)
 		return 0;
 
 	if (!(flags & SPARSE_INDEX_MEMORY_ONLY)) {
@@ -184,6 +209,12 @@ int convert_to_sparse(struct index_state *istate, int flags)
 		return 0;
 
 	/*
+	 * If we are purposefully collapsing a full index, then don't give
+	 * advice when it is expanded later.
+	 */
+	give_advice_on_expansion = 0;
+
+	/*
 	 * NEEDSWORK: If we have unmerged entries, then stay full.
 	 * Unmerged entries prevent the cache-tree extension from working.
 	 */
@@ -217,7 +248,8 @@ int convert_to_sparse(struct index_state *istate, int flags)
 	cache_tree_update(istate, 0);
 
 	istate->fsmonitor_has_run_once = 0;
-	FREE_AND_NULL(istate->fsmonitor_dirty);
+	ewah_free(istate->fsmonitor_dirty);
+	istate->fsmonitor_dirty = NULL;
 	FREE_AND_NULL(istate->fsmonitor_last_update);
 
 	istate->sparse_index = INDEX_COLLAPSED;
@@ -328,6 +360,12 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 			pl = NULL;
 	}
 
+	if (!pl && give_advice_on_expansion) {
+		give_advice_on_expansion = 0;
+		advise_if_enabled(ADVICE_SPARSE_INDEX_EXPANDED,
+				  _(ADVICE_MSG));
+	}
+
 	/*
 	 * A NULL pattern set indicates we are expanding a full index, so
 	 * we use a special region name that indicates the full expansion.
@@ -407,7 +445,8 @@ void expand_index(struct index_state *istate, struct pattern_list *pl)
 	istate->cache_nr = full->cache_nr;
 	istate->cache_alloc = full->cache_alloc;
 	istate->fsmonitor_has_run_once = 0;
-	FREE_AND_NULL(istate->fsmonitor_dirty);
+	ewah_free(istate->fsmonitor_dirty);
+	istate->fsmonitor_dirty = NULL;
 	FREE_AND_NULL(istate->fsmonitor_last_update);
 
 	strbuf_release(&base);
@@ -633,8 +672,10 @@ static void clear_skip_worktree_from_present_files_full(struct index_state *ista
 
 void clear_skip_worktree_from_present_files(struct index_state *istate)
 {
-	if (!core_apply_sparse_checkout ||
-	    sparse_expect_files_outside_of_patterns)
+	struct repo_config_values *cfg = repo_config_values(the_repository);
+
+	if (!cfg->apply_sparse_checkout ||
+	    cfg->sparse_expect_files_outside_of_patterns)
 		return;
 
 	if (clear_skip_worktree_from_present_files_sparse(istate)) {

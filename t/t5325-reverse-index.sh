@@ -2,7 +2,6 @@
 
 test_description='on-disk reverse index'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 # The below tests want control over the 'pack.writeReverseIndex' setting
@@ -66,7 +65,7 @@ test_expect_success 'index-pack can verify reverse indexes' '
 
 	test_must_fail git index-pack --rev-index --verify \
 		$packdir/pack-$pack.pack 2>err &&
-	grep "validation error" err
+	test_grep "validation error" err
 '
 
 test_expect_success 'index-pack infers reverse index name with -o' '

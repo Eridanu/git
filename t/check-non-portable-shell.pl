@@ -36,7 +36,7 @@ while (<>) {
 
 	$_ = $line;
 	/\bcp\s+-a/ and err 'cp -a is not portable';
-	/\bsed\s+-[^efn]\s+/ and err 'sed option not portable (use only -n, -e, -f)';
+	/\bsed\s+-[^Eefn]\s+/ and err 'sed option not portable (use only -E, -n, -e, -f)';
 	/\becho\s+-[neE]/ and err 'echo with option is not portable (use printf)';
 	/^\s*declare\s+/ and err 'arrays/declare not portable';
 	/^\s*[^#]\s*which\s/ and err 'which is not portable (use type)';
@@ -49,8 +49,8 @@ while (<>) {
 	/\bexport\s+[A-Za-z0-9_]*=/ and err '"export FOO=bar" is not portable (use FOO=bar && export FOO)';
 	/\blocal\s+[A-Za-z0-9_]*=\$([A-Za-z0-9_{]|[(][^(])/ and
 		err q(quote "$val" in 'local var=$val');
-	/^\s*([A-Z0-9_]+=(\w*|(["']).*?\3)\s+)+(\w+)/ and exists($func{$4}) and
-		err '"FOO=bar shell_func" assignment extends beyond "shell_func"';
+	/\b([A-Z0-9_]+=(\w*|(["']).*?\3)\s+)+(\w+)/ and !/test_env.+=/ and exists($func{$4}) and
+		err '"FOO=bar shell_func" is not portable (use test_env FOO=bar shell_func)';
 	$line = '';
 	# this resets our $. for each file
 	close ARGV if eof;

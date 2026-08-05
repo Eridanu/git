@@ -306,7 +306,7 @@ test_expect_success 'push messages' '
 	echo new >>file &&
 	git commit -a -m new &&
 	git push origin new_branch 2> msg &&
-	! grep "\[new branch\]" msg
+	test_grep ! "\[new branch\]" msg
 	)
 '
 
@@ -342,6 +342,17 @@ test_expect_success 'fetch tag' '
 	 git fetch
 	) &&
 	compare_refs local v1.0 server v1.0
+'
+
+test_expect_success 'totally broken helper reports failure message' '
+	write_script git-remote-broken <<-\EOF &&
+	read cap_cmd
+	exit 1
+	EOF
+	test_must_fail \
+		env PATH="$PWD:$PATH" \
+		git clone broken://example.com/foo.git 2>stderr &&
+	test_grep aborted stderr
 '
 
 test_done

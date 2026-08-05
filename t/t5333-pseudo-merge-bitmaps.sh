@@ -28,9 +28,8 @@ test_pseudo_merges_reused () {
 
 tag_everything () {
 	git rev-list --all --no-object-names >in &&
-	perl -lne '
-		print "create refs/tags/" . $. . " " . $1 if /([0-9a-f]+)/
-	' <in | git update-ref --stdin
+	sed 's|\(.*\)|create refs/tags/\1 \1|' in |
+	git update-ref --stdin
 }
 
 test_expect_success 'setup' '
@@ -102,7 +101,7 @@ test_expect_success 'stale bitmap traversal with pseudo-merges' '
 	test_cmp expect actual
 '
 
-test_expect_success 'bitmapPseudoMerge.sampleRate adjusts commit selection rate' '
+test_expect_success PERL_TEST_HELPERS 'bitmapPseudoMerge.sampleRate adjusts commit selection rate' '
 	test_config bitmapPseudoMerge.test.pattern "refs/tags/" &&
 	test_config bitmapPseudoMerge.test.maxMerges 1 &&
 	test_config bitmapPseudoMerge.test.stableThreshold never &&
@@ -208,7 +207,8 @@ test_expect_success 'bitmapPseudoMerge.stableThreshold creates stable groups' '
 '
 
 test_expect_success 'out of order thresholds are rejected' '
-	test_must_fail git \
+	# Disable the test var to remove a stderr message.
+	test_must_fail env GIT_TEST_NAME_HASH_VERSION=1 git \
 		-c bitmapPseudoMerge.test.pattern="refs/*" \
 		-c bitmapPseudoMerge.test.threshold=1.month.ago \
 		-c bitmapPseudoMerge.test.stableThreshold=1.week.ago \
@@ -234,9 +234,8 @@ test_expect_success 'pseudo-merge pattern with capture groups' '
 			test_commit_bulk 16 &&
 
 			git rev-list HEAD~16.. >in &&
-
-			perl -lne "print \"create refs/remotes/$r/tags/\$. \$_\"" <in |
-			git update-ref --stdin || return 1
+			sed "s|\(.*\)|create refs/remotes/$r/tags/\1 \1|" in >refs &&
+			git update-ref --stdin <refs || return 1
 		done &&
 
 		git \
@@ -251,7 +250,7 @@ test_expect_success 'pseudo-merge pattern with capture groups' '
 		do
 			test_pseudo_merge_commits $m >oids &&
 			grep -f oids refs |
-			perl -lne "print \$1 if /refs\/remotes\/([0-9]+)/" |
+			sed -n "s|refs/remotes/\([0-9][0-9]*\)/|\1|p" &&
 			sort -u || return 1
 		done >remotes &&
 
@@ -387,6 +386,308 @@ test_expect_success 'pseudo-merge reuse' '
 		sort -u <unstable-oids.before >expect &&
 		sort -u <unstable-oids.after >actual &&
 		test_cmp expect actual
+	)
+'
+
+test_expect_success 'empty pseudo-merge group' '
+	git init pseudo-merge-empty-group &&
+	(
+		cd pseudo-merge-empty-group &&
+
+		# Ensure that a pseudo-merge group with no unstable
+		# commits does not generate an empty pseudo-merge
+		# bitmap.
+		git config bitmapPseudoMerge.empty.pattern refs/ &&
+
+		test_commit base &&
+		git repack -adb &&
+
+		test-tool bitmap dump-pseudo-merges >merges &&
+		test_line_count = 1 merges &&
+
+		test 0 -eq "$(grep -c commits=0 <merges)"
+	)
+'
+
+test_expect_success 'pseudo-merge closure' '
+	git init pseudo-merge-closure &&
+	(
+		cd pseudo-merge-closure &&
+
+		test_commit A &&
+		git repack -d &&
+
+		test_commit B &&
+
+		# Note that the contents of A is packed, but B is not. A
+		# (and the objects reachable from it) are thus visible
+		# to the MIDX, but the same is not true for B and its
+		# objects.
+		#
+		# Ensure that we do not attempt to create a pseudo-merge
+		# for B, depsite it matching the below pseudo-merge
+		# group pattern, as doing so would result in a failure
+		# to write a non-closed bitmap.
+		git config bitmapPseudoMerge.test.pattern refs/ &&
+		git config bitmapPseudoMerge.test.threshold now &&
+
+		git multi-pack-index write --bitmap &&
+
+		test-tool bitmap dump-pseudo-merges >pseudo-merges &&
+		test_line_count = 1 pseudo-merges &&
+
+		git rev-parse A >expect &&
+
+		test-tool bitmap list-commits >actual &&
+		test_cmp expect actual &&
+		test-tool bitmap dump-pseudo-merge-commits 0 >actual &&
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'use pseudo-merge in boundary traversal' '
+	git init pseudo-merge-boundary-traversal &&
+	(
+		cd pseudo-merge-boundary-traversal &&
+
+		git config bitmapPseudoMerge.test.pattern refs/ &&
+		git config pack.useBitmapBoundaryTraversal true &&
+
+		test_commit A &&
+		git repack -adb &&
+		test_commit B &&
+
+		nr=$(git rev-list --count --use-bitmap-index HEAD~1..HEAD) &&
+		test 1 -eq "$nr"
+	)
+'
+
+test_expect_success 'apply pseudo-merges during fill-in traversal' '
+	test_when_finished "rm -fr pseudo-merge-fill-in-traversal" &&
+	git init pseudo-merge-fill-in-traversal &&
+	(
+		cd pseudo-merge-fill-in-traversal &&
+
+		git config bitmapPseudoMerge.test.pattern refs/tags/ &&
+		git config bitmapPseudoMerge.test.maxMerges 1 &&
+		git config bitmapPseudoMerge.test.stableThreshold never &&
+
+		test_commit_bulk 64 &&
+		tag_everything &&
+		git repack -ad &&
+
+		pack=$(ls .git/objects/pack/pack-*.pack) &&
+		git rev-parse HEAD~63 >in &&
+		test-tool bitmap write "$(basename $pack)" <in &&
+
+		test_pseudo_merges >merges &&
+		test_line_count = 1 merges &&
+
+		test_commit stale &&
+
+		git rev-list --count --objects HEAD >expect &&
+
+		: >trace2.txt &&
+		GIT_TRACE2_EVENT=$PWD/trace2.txt \
+			git rev-list --count --objects --use-bitmap-index HEAD >actual &&
+		test_pseudo_merges_satisfied 1 <trace2.txt &&
+
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'apply pseudo-merges from multiple groups during fill-in' '
+	test_when_finished "rm -fr pseudo-merge-fill-in-multi" &&
+	git init pseudo-merge-fill-in-multi &&
+	(
+		cd pseudo-merge-fill-in-multi &&
+
+		test_commit base &&
+		base=$(git rev-parse HEAD) &&
+
+		for side in left right
+		do
+			git checkout -B $side base &&
+
+			test_commit_bulk --id=$side 64 &&
+			git rev-list --no-object-names HEAD --not $base >in &&
+			while read oid
+			do
+				echo "create refs/group-$side/$oid $oid" || return 1
+			done <in | git update-ref --stdin || return 1
+		done &&
+
+		git checkout left &&
+		git merge right &&
+		git repack -ad &&
+
+		git config bitmapPseudoMerge.left.pattern "refs/group-left/" &&
+		git config bitmapPseudoMerge.left.maxMerges 1 &&
+		git config bitmapPseudoMerge.left.stableThreshold never &&
+
+		git config bitmapPseudoMerge.right.pattern "refs/group-right/" &&
+		git config bitmapPseudoMerge.right.maxMerges 1 &&
+		git config bitmapPseudoMerge.right.stableThreshold never &&
+
+		pack="$(ls .git/objects/pack/pack-*.pack)" &&
+		git rev-parse "$base" >in &&
+		test-tool bitmap write "$(basename $pack)" <in &&
+
+		test_pseudo_merges >merges &&
+		test_line_count = 2 merges &&
+
+		test_commit stale &&
+
+		git rev-list --count --objects HEAD >expect &&
+
+		: >trace2.txt &&
+		GIT_TRACE2_EVENT=$PWD/trace2.txt \
+			git rev-list --count --objects --use-bitmap-index HEAD >actual &&
+		test_pseudo_merges_satisfied 2 <trace2.txt &&
+
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'apply pseudo-merges with overlapping groups during fill-in' '
+	test_when_finished "rm -fr pseudo-merge-fill-in-overlap" &&
+	git init pseudo-merge-fill-in-overlap &&
+	(
+		cd pseudo-merge-fill-in-overlap &&
+
+		test_commit_bulk 64 &&
+		tag_everything &&
+		git repack -ad &&
+
+		pack="$(ls .git/objects/pack/pack-*.pack)" &&
+
+		# Use two pseudo-merge group patterns that both match
+		# refs/tags/, so every tagged commit belongs to both
+		# groups. This exercises the extended lookup table
+		# path in apply_pseudo_merges_for_commit().
+		git config bitmapPseudoMerge.all.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.all.maxMerges 1 &&
+		git config bitmapPseudoMerge.all.stableThreshold never &&
+
+		git config bitmapPseudoMerge.tags.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.tags.maxMerges 1 &&
+		git config bitmapPseudoMerge.tags.stableThreshold never &&
+
+		git rev-parse HEAD~63 >in &&
+		test-tool bitmap write "$(basename $pack)" <in &&
+
+		test_pseudo_merges >merges &&
+		test_line_count = 2 merges &&
+
+		test_commit stale &&
+
+		git rev-list --count --objects HEAD >expect &&
+
+		: >trace2.txt &&
+		GIT_TRACE2_EVENT=$PWD/trace2.txt \
+			git rev-list --count --objects --use-bitmap-index HEAD >actual &&
+		test_pseudo_merges_satisfied 2 <trace2.txt &&
+
+		test_cmp expect actual
+	)
+'
+
+test_expect_success 'pseudo-merge commits are correctly classified by date' '
+	test_when_finished "rm -fr pseudo-merge-date-classification" &&
+	git init pseudo-merge-date-classification &&
+	(
+		cd pseudo-merge-date-classification &&
+
+		test_commit_bulk 64 &&
+
+		tag_everything &&
+		git repack -ad &&
+
+		pack="$(ls .git/objects/pack/pack-*.pack)" &&
+
+		# Configure two pseudo-merge groups: one that only
+		# matches "stable" refs (older than one month), and
+		# one that matches all refs. With 64 tags whose
+		# commits are all younger than one month, the
+		# "stable" group should have zero pseudo-merges and
+		# the "all" group should have one.
+		#
+		# Use GIT_TEST_DATE_NOW to align "now" (and therefore
+		# "1.month.ago") with the test_tick timestamps so that
+		# the commits are within the last month.
+		#
+		# Without parsing the commit, its date field would
+		# be zero, causing it to satisfy date <= threshold
+		# for the "stable" group as well, and both groups
+		# would produce pseudo-merges.
+		git config bitmapPseudoMerge.stable.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.stable.maxMerges 64 &&
+		git config bitmapPseudoMerge.stable.stableThreshold never &&
+		git config bitmapPseudoMerge.stable.threshold 1.month.ago &&
+
+		git config bitmapPseudoMerge.all.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.all.maxMerges 1 &&
+		git config bitmapPseudoMerge.all.stableThreshold never &&
+		git config bitmapPseudoMerge.all.threshold now &&
+
+		git rev-parse HEAD~63 >in &&
+		GIT_TEST_DATE_NOW=$test_tick \
+			test-tool bitmap write "$(basename $pack)" <in &&
+
+		test_pseudo_merges >merges &&
+		test_line_count = 1 merges
+	)
+'
+
+test_expect_success 'sampleRate=0 does not cause division by zero' '
+	test_when_finished "rm -fr pseudo-merge-sample-rate-zero" &&
+	git init pseudo-merge-sample-rate-zero &&
+	(
+		cd pseudo-merge-sample-rate-zero &&
+
+		test_commit_bulk 64 &&
+		tag_everything &&
+		git repack -ad &&
+
+		pack="$(ls .git/objects/pack/pack-*.pack)" &&
+
+		git config bitmapPseudoMerge.test.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.test.maxMerges 1 &&
+		git config bitmapPseudoMerge.test.sampleRate 0 &&
+		git config bitmapPseudoMerge.test.threshold now &&
+		git config bitmapPseudoMerge.test.stableThreshold never &&
+
+		git rev-parse HEAD~63 >in &&
+		test-tool bitmap write "$(basename $pack)" <in
+	)
+'
+
+test_expect_success 'duplicate pseudo-merge pattern does not leak' '
+	test_when_finished "rm -fr pseudo-merge-dup-pattern" &&
+	git init pseudo-merge-dup-pattern &&
+	(
+		cd pseudo-merge-dup-pattern &&
+
+		test_commit_bulk 64 &&
+		tag_everything &&
+		git repack -ad &&
+
+		pack=$(ls .git/objects/pack/pack-*.pack) &&
+
+		# Set the same group'\''s pattern twice. The second
+		# assignment should cleanly release the compiled regex
+		# from the first without leaking.
+		git config bitmapPseudoMerge.test.pattern "refs/tags/" &&
+		git config --add bitmapPseudoMerge.test.pattern "refs/tags/" &&
+		git config bitmapPseudoMerge.test.maxMerges 1 &&
+		git config bitmapPseudoMerge.test.threshold now &&
+		git config bitmapPseudoMerge.test.stableThreshold never &&
+
+		git rev-parse HEAD~63 >in &&
+		test-tool bitmap write "$(basename $pack)" <in &&
+
+		test_pseudo_merges >merges &&
+		test_line_count = 1 merges
 	)
 '
 

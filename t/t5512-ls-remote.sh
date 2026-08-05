@@ -86,7 +86,7 @@ test_expect_success 'ls-remote -h is deprecated w/o warning' '
 '
 
 test_expect_success 'ls-remote --heads is deprecated and hidden w/o warning' '
-	test_expect_code 129 git ls-remote -h >short-help &&
+	git ls-remote -h >short-help &&
 	test_grep ! -e --head short-help &&
 	git ls-remote --heads self >actual 2>warning &&
 	test_cmp expected.branches actual &&
@@ -245,8 +245,8 @@ do
 		git config --add $configsection.hiderefs "!refs/tags/magic" &&
 		git config --add $configsection.hiderefs refs/tags/magic/one &&
 		git ls-remote . >actual &&
-		grep refs/tags/magic/two actual &&
-		! grep refs/tags/magic/one actual
+		test_grep refs/tags/magic/two actual &&
+		test_grep ! refs/tags/magic/one actual
 	'
 
 done
@@ -255,13 +255,13 @@ test_expect_success 'overrides work between mixed transfer/upload-pack hideRefs'
 	test_config uploadpack.hiderefs refs/tags &&
 	test_config transfer.hiderefs "!refs/tags/magic" &&
 	git ls-remote . >actual &&
-	grep refs/tags/magic actual
+	test_grep refs/tags/magic actual
 '
 
 test_expect_success 'protocol v2 supports hiderefs' '
 	test_config uploadpack.hiderefs refs/tags &&
 	git -c protocol.version=2 ls-remote . >actual &&
-	! grep refs/tags actual
+	test_grep ! refs/tags actual
 '
 
 test_expect_success 'ls-remote --symref' '
@@ -292,6 +292,8 @@ test_expect_success 'ls-remote with filtered symref (refname)' '
 	cat >expect <<-EOF &&
 	ref: refs/heads/main	HEAD
 	$rev	HEAD
+	ref: refs/remotes/origin/main	refs/remotes/origin/HEAD
+	$rev	refs/remotes/origin/HEAD
 	EOF
 	git ls-remote --symref . HEAD >actual &&
 	test_cmp expect actual
@@ -400,6 +402,20 @@ test_expect_success 'v0 clients can handle multiple symrefs' '
 
 	git ls-remote --symref --upload-pack=./cat-input . >actual &&
 	test_cmp expect actual
+'
+
+test_expect_success 'helper with refspec capability fails gracefully' '
+	mkdir test-bin &&
+	write_script test-bin/git-remote-foo <<-EOF &&
+	read capabilities
+	echo import
+	echo refspec ${SQ}*:*${SQ}
+	EOF
+	(
+		PATH="$PWD/test-bin:$PATH" &&
+		export PATH &&
+		test_must_fail nongit git ls-remote foo::bar
+	)
 '
 
 test_done

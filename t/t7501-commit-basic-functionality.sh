@@ -9,7 +9,6 @@ test_description='git commit'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY/lib-diff.sh"
 
@@ -47,7 +46,7 @@ test_expect_success 'paths and -a do not mix' '
 	test_must_fail git commit -m foo -a file
 '
 
-test_expect_success PERL 'can use paths with --interactive' '
+test_expect_success 'can use paths with --interactive' '
 	echo bong-o-bong >file &&
 	# 2: update, 1:st path, that is all, 7: quit
 	test_write_lines 2 1 "" 7 |
@@ -343,15 +342,15 @@ test_expect_success 'overriding author from command line' '
 	echo gak >file &&
 	git commit -m author \
 		--author "Rubber Duck <rduck@convoy.org>" -a >output 2>&1 &&
-	grep Rubber.Duck output
+	test_grep Rubber.Duck output
 '
 
-test_expect_success PERL 'interactive add' '
+test_expect_success 'interactive add' '
 	echo 7 | test_must_fail git commit --interactive >out &&
-	grep "What now" out
+	test_grep "What now" out
 '
 
-test_expect_success PERL "commit --interactive doesn't change index if editor aborts" '
+test_expect_success "commit --interactive doesn't change index if editor aborts" '
 	echo zoo >file &&
 	test_must_fail git diff --exit-code >diff1 &&
 	test_write_lines u "*" q |
@@ -377,13 +376,13 @@ test_expect_success 'editor not invoked if -F is given' '
 
 	EDITOR=./editor git commit -a -F msg &&
 	git show -s --pretty=format:%s >subject &&
-	grep -q good subject &&
+	test_grep -q good subject &&
 
 	echo quack >file &&
 	echo Another good message. |
 	EDITOR=./editor git commit -a -F - &&
 	git show -s --pretty=format:%s >subject &&
-	grep -q good subject
+	test_grep -q good subject
 '
 
 test_expect_success 'partial commit that involves removal (1)' '
@@ -472,7 +471,7 @@ test_expect_success 'amend does not add signoff if it already exists' '
 
 test_expect_success 'commit mentions forced date in output' '
 	git commit --amend --date=2010-01-02T03:04:05 >output &&
-	grep "Date: *Sat Jan 2 03:04:05 2010" output
+	test_grep "Date: *Sat Jan 2 03:04:05 2010" output
 '
 
 test_expect_success 'commit complains about completely bogus dates' '
@@ -661,9 +660,9 @@ test_expect_success 'git commit <file> with dirty index' '
 	git add chz &&
 	git commit elif -m "tacocat is a palindrome" &&
 	git show --stat >stat &&
-	grep elif stat &&
+	test_grep elif stat &&
 	git diff --cached >diff &&
-	grep chz diff
+	test_grep chz diff
 '
 
 test_expect_success 'same tree (single parent)' '
@@ -677,7 +676,7 @@ test_expect_success 'same tree (single parent) --allow-empty' '
 
 	git commit --allow-empty -m "forced empty" &&
 	git cat-file commit HEAD >commit &&
-	grep forced commit
+	test_grep forced commit
 
 '
 

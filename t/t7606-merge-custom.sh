@@ -14,7 +14,6 @@ Testing a custom strategy.
 * (tag: c0) c0
 "
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'set up custom strategy' '
@@ -61,7 +60,7 @@ test_expect_success 'merge c2 with a custom strategy' '
 	test_cmp second-parent.expected second-parent &&
 	test_cmp tree.expected tree &&
 	test -f c0.c &&
-	grep c1c1 c1.c &&
+	test_grep c1c1 c1.c &&
 	test -f c2.c
 '
 

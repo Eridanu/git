@@ -2,7 +2,6 @@
 
 test_description='git mv in subdirs'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-diff-data.sh
 
@@ -47,7 +46,7 @@ test_expect_success 'commiting the change' '
 
 test_expect_success 'checking the commit' '
 	git diff-tree -r -M --name-status  HEAD^ HEAD >actual &&
-	grep "^R100..*path0/COPYING..*path1/COPYING" actual
+	test_grep "^R100..*path0/COPYING..*path1/COPYING" actual
 '
 
 test_expect_success 'moving the file back into subdirectory' '
@@ -61,7 +60,7 @@ test_expect_success 'commiting the change' '
 
 test_expect_success 'checking the commit' '
 	git diff-tree -r -M --name-status  HEAD^ HEAD >actual &&
-	grep "^R100..*path1/COPYING..*path0/COPYING" actual
+	test_grep "^R100..*path1/COPYING..*path0/COPYING" actual
 '
 
 test_expect_success 'mv --dry-run does not move file' '
@@ -148,8 +147,8 @@ test_expect_success 'commiting the change' '
 
 test_expect_success 'checking the commit' '
 	git diff-tree -r -M --name-status  HEAD^ HEAD >actual &&
-	grep "^R100..*path0/COPYING..*path2/COPYING" actual &&
-	grep "^R100..*path0/README..*path2/README" actual
+	test_grep "^R100..*path0/COPYING..*path2/COPYING" actual &&
+	test_grep "^R100..*path0/README..*path2/README" actual
 '
 
 test_expect_success 'succeed when source is a prefix of destination' '
@@ -166,8 +165,8 @@ test_expect_success 'commiting the change' '
 
 test_expect_success 'checking the commit' '
 	git diff-tree -r -M --name-status  HEAD^ HEAD >actual &&
-	grep "^R100..*path2/COPYING..*path1/path2/COPYING" actual &&
-	grep "^R100..*path2/README..*path1/path2/README" actual
+	test_grep "^R100..*path2/COPYING..*path1/path2/COPYING" actual &&
+	test_grep "^R100..*path2/README..*path1/path2/README" actual
 '
 
 test_expect_success 'do not move directory over existing directory' '
@@ -201,7 +200,7 @@ test_expect_success "Michael Cassar's test case" '
 
 	T=$(git write-tree) &&
 	git ls-tree -r $T >out &&
-	grep partA/outline.txt out
+	test_grep partA/outline.txt out
 '
 
 rm -fr papers partA path?
@@ -505,7 +504,7 @@ test_expect_success 'mv -k does not accidentally destroy submodules' '
 	mkdir dummy dest &&
 	git mv -k dummy sub dest &&
 	git status --porcelain >actual &&
-	grep "^R  sub -> dest/sub" actual &&
+	test_grep "^R  sub -> dest/sub" actual &&
 	git reset --hard &&
 	git checkout .
 '
@@ -549,6 +548,34 @@ test_expect_success 'moving nested submodules' '
 	git submodule update --init --recursive &&
 	git mv nested_move sub_nested_moved &&
 	git status
+'
+
+test_expect_success 'moving file and its parent directory at the same time fails' '
+	test_when_finished git reset --hard HEAD &&
+	git reset --hard HEAD &&
+	mkdir -p a &&
+	mkdir -p b &&
+	>a/a.txt &&
+	git add a/a.txt &&
+	cat >expect <<-EOF &&
+	fatal: cannot move both ${SQ}a/a.txt${SQ} and its parent directory ${SQ}a${SQ}
+	EOF
+	test_must_fail git mv a/a.txt a b 2>err &&
+	test_cmp expect err
+'
+
+test_expect_success 'moving nested directory and its parent directory at the same time fails' '
+	test_when_finished git reset --hard HEAD &&
+	git reset --hard HEAD &&
+	mkdir -p a/b/c &&
+	>a/b/c/file.txt &&
+	git add a &&
+	mkdir target &&
+	cat >expect <<-EOF &&
+	fatal: cannot move both ${SQ}a/b/c${SQ} and its parent directory ${SQ}a${SQ}
+	EOF
+	test_must_fail git mv a/b/c a target 2>err &&
+	test_cmp expect err
 '
 
 test_done

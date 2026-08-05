@@ -14,7 +14,6 @@ test_description='merge-recursive space options
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_have_prereq SED_STRIPS_CR && SED_OPTIONS=-b
@@ -110,7 +109,7 @@ test_expect_success 'naive merge fails' '
 	git read-tree --reset -u HEAD &&
 	test_must_fail git merge-recursive HEAD^ -- HEAD remote &&
 	test_must_fail git update-index --refresh &&
-	grep "<<<<<<" text.txt
+	test_grep "<<<<<<" text.txt
 '
 
 test_expect_success '--ignore-space-change makes merge succeed' '
@@ -124,7 +123,7 @@ test_expect_success 'naive cherry-pick fails' '
 	git read-tree --reset -u HEAD &&
 	test_must_fail git cherry-pick remote &&
 	test_must_fail git update-index --refresh &&
-	grep "<<<<<<" text.txt
+	test_grep "<<<<<<" text.txt
 '
 
 test_expect_success '-Xignore-space-change makes cherry-pick succeed' '

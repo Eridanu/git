@@ -1,14 +1,16 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "commit-reach.h"
+#include "commit-slab.h"
 #include "config.h"
 #include "diff.h"
 #include "diffcore.h"
 #include "environment.h"
 #include "hex.h"
 #include "object-name.h"
-#include "object-store-ll.h"
+#include "object-file.h"
 #include "repository.h"
 #include "tmp-objdir.h"
 #include "commit.h"
@@ -31,6 +33,7 @@
 #include "tree.h"
 #include "wildmatch.h"
 #include "write-or-die.h"
+#include "pager.h"
 
 static struct decoration name_decoration = { "object names" };
 static int decoration_loaded;
@@ -55,7 +58,7 @@ static const char *color_decorate_slots[] = {
 	[DECORATION_GRAFTED]	= "grafted",
 };
 
-static const char *decorate_get_color(int decorate_use_color, enum decoration_type ix)
+static const char *decorate_get_color(enum git_colorbool decorate_use_color, enum decoration_type ix)
 {
 	if (want_color(decorate_use_color))
 		return decoration_colors[ix];
@@ -145,9 +148,7 @@ static int ref_filter_match(const char *refname,
 	return 1;
 }
 
-static int add_ref_decoration(const char *refname, const struct object_id *oid,
-			      int flags UNUSED,
-			      void *cb_data)
+static int add_ref_decoration(const struct reference *ref, void *cb_data)
 {
 	int i;
 	struct object *obj;
@@ -156,16 +157,16 @@ static int add_ref_decoration(const char *refname, const struct object_id *oid,
 	struct decoration_filter *filter = (struct decoration_filter *)cb_data;
 	const char *git_replace_ref_base = ref_namespace[NAMESPACE_REPLACE].ref;
 
-	if (filter && !ref_filter_match(refname, filter))
+	if (filter && !ref_filter_match(ref->name, filter))
 		return 0;
 
-	if (starts_with(refname, git_replace_ref_base)) {
+	if (starts_with(ref->name, git_replace_ref_base)) {
 		struct object_id original_oid;
 		if (!replace_refs_enabled(the_repository))
 			return 0;
-		if (get_oid_hex(refname + strlen(git_replace_ref_base),
+		if (get_oid_hex(ref->name + strlen(git_replace_ref_base),
 				&original_oid)) {
-			warning("invalid replace ref %s", refname);
+			warning("invalid replace ref %s", ref->name);
 			return 0;
 		}
 		obj = parse_object(the_repository, &original_oid);
@@ -174,10 +175,10 @@ static int add_ref_decoration(const char *refname, const struct object_id *oid,
 		return 0;
 	}
 
-	objtype = oid_object_info(the_repository, oid, NULL);
+	objtype = odb_read_object_info(the_repository->objects, ref->oid, NULL);
 	if (objtype < 0)
 		return 0;
-	obj = lookup_object_by_type(the_repository, oid, objtype);
+	obj = lookup_object_by_type(the_repository, ref->oid, objtype);
 
 	for (i = 0; i < ARRAY_SIZE(ref_namespace); i++) {
 		struct ref_namespace_info *info = &ref_namespace[i];
@@ -185,24 +186,24 @@ static int add_ref_decoration(const char *refname, const struct object_id *oid,
 		if (!info->decoration)
 			continue;
 		if (info->exact) {
-			if (!strcmp(refname, info->ref)) {
+			if (!strcmp(ref->name, info->ref)) {
 				deco_type = info->decoration;
 				break;
 			}
-		} else if (starts_with(refname, info->ref)) {
+		} else if (starts_with(ref->name, info->ref)) {
 			deco_type = info->decoration;
 			break;
 		}
 	}
 
-	add_name_decoration(deco_type, refname, obj);
+	add_name_decoration(deco_type, ref->name, obj);
 	while (obj->type == OBJ_TAG) {
 		if (!obj->parsed)
 			parse_object(the_repository, &obj->oid);
 		obj = ((struct tag *)obj)->tagged;
 		if (!obj)
 			break;
-		add_name_decoration(DECORATION_REF_TAG, refname, obj);
+		add_name_decoration(DECORATION_REF_TAG, ref->name, obj);
 	}
 	return 0;
 }
@@ -231,6 +232,11 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 			for_each_string_list_item(item, filter->exclude_ref_config_pattern) {
 				normalize_glob_ref(item, NULL, item->string);
 			}
+
+			/* normalize_glob_ref duplicates the strings */
+			filter->exclude_ref_pattern->strdup_strings = 1;
+			filter->include_ref_pattern->strdup_strings = 1;
+			filter->exclude_ref_config_pattern->strdup_strings = 1;
 		}
 		decoration_loaded = 1;
 		decoration_flags = flags;
@@ -239,6 +245,27 @@ void load_ref_decorations(struct decoration_filter *filter, int flags)
 		refs_head_ref(get_main_ref_store(the_repository),
 			      add_ref_decoration, filter);
 		for_each_commit_graft(add_graft_decoration, filter);
+	}
+}
+
+void load_branch_decorations(void)
+{
+	if (!decoration_loaded) {
+		struct string_list decorate_refs_exclude = STRING_LIST_INIT_NODUP;
+		struct string_list decorate_refs_exclude_config = STRING_LIST_INIT_NODUP;
+		struct string_list decorate_refs_include = STRING_LIST_INIT_NODUP;
+		struct decoration_filter decoration_filter = {
+			.include_ref_pattern = &decorate_refs_include,
+			.exclude_ref_pattern = &decorate_refs_exclude,
+			.exclude_ref_config_pattern = &decorate_refs_exclude_config,
+		};
+
+		string_list_append(&decorate_refs_include, "refs/heads/");
+		load_ref_decorations(&decoration_filter, 0);
+
+		string_list_clear(&decorate_refs_exclude, 0);
+		string_list_clear(&decorate_refs_exclude_config, 0);
+		string_list_clear(&decorate_refs_include, 0);
 	}
 }
 
@@ -313,7 +340,7 @@ static void show_name(struct strbuf *sb, const struct name_decoration *decoratio
  */
 void format_decorations(struct strbuf *sb,
 			const struct commit *commit,
-			int use_color,
+			enum git_colorbool use_color,
 			const struct decoration_options *opts)
 {
 	const struct name_decoration *decoration;
@@ -411,16 +438,6 @@ void show_decorations(struct rev_info *opt, struct commit *commit)
 	strbuf_release(&sb);
 }
 
-static unsigned int digits_in_number(unsigned int number)
-{
-	unsigned int i = 10, result = 1;
-	while (i <= number) {
-		i *= 10;
-		result++;
-	}
-	return result;
-}
-
 void fmt_output_subject(struct strbuf *filename,
 			const char *subject,
 			struct rev_info *info)
@@ -464,7 +481,7 @@ void fmt_output_email_subject(struct strbuf *sb, struct rev_info *opt)
 		strbuf_addf(sb, "Subject: [%s%s%0*d/%d] ",
 			    opt->subject_prefix,
 			    *opt->subject_prefix ? " " : "",
-			    digits_in_number(opt->total),
+			    decimal_width(opt->total),
 			    opt->nr, opt->total);
 	} else if (opt->total == 0 && opt->subject_prefix && *opt->subject_prefix) {
 		strbuf_addf(sb, "Subject: [%s] ",
@@ -481,7 +498,7 @@ void log_write_email_headers(struct rev_info *opt, struct commit *commit,
 {
 	struct strbuf headers = STRBUF_INIT;
 	const char *name = oid_to_hex(opt->zero_commit ?
-				      null_oid() : &commit->object.oid);
+				      null_oid(the_hash_algo) : &commit->object.oid);
 
 	*need_8bit_cte_p = 0; /* unknown */
 
@@ -684,7 +701,7 @@ static void show_diff_of_diff(struct rev_info *opt)
 		struct diff_queue_struct dq;
 
 		memcpy(&dq, &diff_queued_diff, sizeof(diff_queued_diff));
-		DIFF_QUEUE_CLEAR(&diff_queued_diff);
+		diff_queue_init(&diff_queued_diff);
 
 		fprintf_ln(opt->diffopt.file, "\n%s", opt->idiff_title);
 		show_interdiff(opt->idiff_oid1, opt->idiff_oid2, 2,
@@ -699,11 +716,13 @@ static void show_diff_of_diff(struct rev_info *opt)
 		struct range_diff_options range_diff_opts = {
 			.creation_factor = opt->creation_factor,
 			.dual_color = 1,
-			.diffopt = &opts
+			.max_memory = RANGE_DIFF_MAX_MEMORY_DEFAULT,
+			.diffopt = &opts,
+			.log_arg = &opt->rdiff_log_arg
 		};
 
 		memcpy(&dq, &diff_queued_diff, sizeof(diff_queued_diff));
-		DIFF_QUEUE_CLEAR(&diff_queued_diff);
+		diff_queue_init(&diff_queued_diff);
 
 		fprintf_ln(opt->diffopt.file, "\n%s", opt->rdiff_title);
 		/*
@@ -931,12 +950,7 @@ int log_tree_diff_flush(struct rev_info *opt)
 			 * diff/diffstat output for readability.
 			 */
 			int pch = DIFF_FORMAT_DIFFSTAT | DIFF_FORMAT_PATCH;
-			if (opt->diffopt.output_prefix) {
-				struct strbuf *msg = NULL;
-				msg = opt->diffopt.output_prefix(&opt->diffopt,
-					opt->diffopt.output_prefix_data);
-				fwrite(msg->buf, msg->len, 1, opt->diffopt.file);
-			}
+			fputs(diff_line_prefix(&opt->diffopt), opt->diffopt.file);
 
 			/*
 			 * We may have shown three-dashes line early
@@ -1024,8 +1038,19 @@ static int do_remerge_diff(struct rev_info *opt,
 	struct strbuf parent1_desc = STRBUF_INIT;
 	struct strbuf parent2_desc = STRBUF_INIT;
 
+	/*
+	 * Lazily prepare a temporary object directory and rotate it
+	 * into the alternative object store list as the primary.
+	 */
+	if (opt->remerge_diff && !opt->remerge_objdir) {
+		opt->remerge_objdir = tmp_objdir_create(the_repository, "remerge-diff");
+		if (!opt->remerge_objdir)
+			return error(_("unable to create temporary object directory"));
+		tmp_objdir_replace_primary_odb(opt->remerge_objdir, 1);
+	}
+
 	/* Setup merge options */
-	init_merge_options(&o, the_repository);
+	init_ui_merge_options(&o, the_repository);
 	o.show_rename_progress = 0;
 	o.record_conflict_msgs_as_headers = 1;
 	o.msg_header_prefix = "remerge";
@@ -1053,19 +1078,106 @@ static int do_remerge_diff(struct rev_info *opt,
 	log_tree_diff_flush(opt);
 
 	/* Cleanup */
-	free_commit_list(bases);
+	commit_list_free(bases);
 	cleanup_additional_headers(&opt->diffopt);
 	strbuf_release(&parent1_desc);
 	strbuf_release(&parent2_desc);
 	merge_finalize(&o, &res);
 
 	/* Clean up the contents of the temporary object directory */
-	if (opt->remerge_objdir)
-		tmp_objdir_discard_objects(opt->remerge_objdir);
-	else
-		BUG("did a remerge diff without remerge_objdir?!?");
+	tmp_objdir_discard_objects(opt->remerge_objdir);
 
 	return !opt->loginfo;
+}
+
+/* Per-commit path storage for --follow across merges */
+define_commit_slab(follow_pathspec_slab, char *);
+
+static const char *pathspec_single_path(const struct pathspec *ps)
+{
+	if (ps->nr != 1)
+		return NULL;
+	return ps->items[0].match;
+}
+
+static void set_pathspec_to_single_path(struct pathspec *ps, const char *path)
+{
+	const char *paths[2] = { path, NULL };
+
+	clear_pathspec(ps);
+	parse_pathspec(ps,
+		       PATHSPEC_ALL_MAGIC & ~PATHSPEC_LITERAL,
+		       PATHSPEC_LITERAL_PATH, "", paths);
+}
+
+static void remember_follow_pathspec(struct rev_info *opt,
+				     struct commit *c, const char *path)
+{
+	char **slot;
+
+	if (!path)
+		return;
+	if (!opt->follow_pathspec_slab) {
+		opt->follow_pathspec_slab = xmalloc(sizeof(*opt->follow_pathspec_slab));
+		init_follow_pathspec_slab(opt->follow_pathspec_slab);
+	}
+	slot = follow_pathspec_slab_at(opt->follow_pathspec_slab, c);
+	if (*slot && !strcmp(*slot, path))
+		return;
+	free(*slot);
+	*slot = xstrdup(path);
+}
+
+static const char *recall_follow_pathspec(struct rev_info *opt,
+					  struct commit *c)
+{
+	char **slot;
+
+	if (!opt->follow_pathspec_slab)
+		return NULL;
+	slot = follow_pathspec_slab_peek(opt->follow_pathspec_slab, c);
+	return slot ? *slot : NULL;
+}
+
+static void free_follow_pathspec_slot(char **slot)
+{
+	FREE_AND_NULL(*slot);
+}
+
+void release_follow_pathspec_slab(struct rev_info *opt)
+{
+	if (!opt->follow_pathspec_slab)
+		return;
+	deep_clear_follow_pathspec_slab(opt->follow_pathspec_slab,
+					free_follow_pathspec_slot);
+	FREE_AND_NULL(opt->follow_pathspec_slab);
+}
+
+/* Compute a path to follow in parent, if there is one */
+static void propagate_follow_pathspec_to_parent(struct rev_info *opt,
+						struct commit *commit,
+						struct commit *parent)
+{
+	struct diff_options diff_opts;
+	const char *path;
+
+	parse_commit_or_die(parent);
+	repo_diff_setup(opt->diffopt.repo, &diff_opts);
+	copy_pathspec(&diff_opts.pathspec, &opt->diffopt.pathspec);
+	diff_opts.flags.recursive = 1;
+	diff_opts.flags.follow_renames = 1;
+	diff_opts.output_format = DIFF_FORMAT_NO_OUTPUT;
+	diff_setup_done(&diff_opts);
+	diff_tree_oid(get_commit_tree_oid(parent),
+		      get_commit_tree_oid(commit),
+		      "", &diff_opts);
+
+	path = pathspec_single_path(&diff_opts.pathspec);
+	if (path)
+		remember_follow_pathspec(opt, parent, path);
+
+	diff_queue_clear(&diff_queued_diff);
+	diff_free(&diff_opts);
 }
 
 /*
@@ -1083,6 +1195,12 @@ static int log_tree_diff(struct rev_info *opt, struct commit *commit, struct log
 
 	if (!all_need_diff && !opt->merges_need_diff)
 		return 0;
+
+	if (opt->line_level_traverse) {
+		line_log_queue_pairs(opt, commit);
+		log_tree_diff_flush(opt);
+		return !opt->loginfo;
+	}
 
 	parse_commit_or_die(commit);
 	oid = get_commit_tree_oid(commit);
@@ -1158,9 +1276,15 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 	opt->loginfo = &log;
 	opt->diffopt.no_free = 1;
 
-	/* NEEDSWORK: no restoring of no_free?  Why? */
-	if (opt->line_level_traverse)
-		return line_log_print(opt, commit);
+	/* Any recorded path for this commit? If so, restore it */
+	if (opt->diffopt.flags.follow_renames) {
+		const char *stored = recall_follow_pathspec(opt, commit);
+		if (stored) {
+			const char *current = pathspec_single_path(&opt->diffopt.pathspec);
+			if (!current || strcmp(current, stored))
+				set_pathspec_to_single_path(&opt->diffopt.pathspec, stored);
+		}
+	}
 
 	if (opt->track_linear && !opt->linear && !opt->reverse_output_stage)
 		fprintf(opt->diffopt.file, "\n%s\n", opt->break_bar);
@@ -1174,6 +1298,21 @@ int log_tree_commit(struct rev_info *opt, struct commit *commit)
 		fprintf(opt->diffopt.file, "\n%s\n", opt->break_bar);
 	if (shown)
 		show_diff_of_diff(opt);
+
+	/* Record what path each parent of this commit should use */
+	if (opt->diffopt.flags.follow_renames) {
+		struct commit_list *parents = get_saved_parents(opt, commit);
+		if (parents && parents->next) {
+			struct commit_list *p;
+			for (p = parents; p; p = p->next)
+				propagate_follow_pathspec_to_parent(opt, commit,
+								    p->item);
+		} else if (parents) {
+			remember_follow_pathspec(opt, parents->item,
+				pathspec_single_path(&opt->diffopt.pathspec));
+		}
+	}
+
 	opt->loginfo = NULL;
 	maybe_flush_or_die(opt->diffopt.file, "stdout");
 	opt->diffopt.no_free = no_free;

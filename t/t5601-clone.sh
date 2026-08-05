@@ -159,8 +159,8 @@ test_expect_success 'clone --mirror does not repeat tags' '
 	git clone --mirror src mirror2 &&
 	(cd mirror2 &&
 	 git show-ref 2> clone.err > clone.out) &&
-	! grep Duplicate mirror2/clone.err &&
-	grep some-tag mirror2/clone.out
+	test_grep ! Duplicate mirror2/clone.err &&
+	test_grep some-tag mirror2/clone.out
 
 '
 
@@ -224,12 +224,12 @@ test_expect_success 'clone a void' '
 		cd src-0 && git init
 	) &&
 	git clone "file://$(pwd)/src-0" target-6 2>err-6 &&
-	! grep "fatal:" err-6 &&
+	test_grep ! "fatal:" err-6 &&
 	(
 		cd src-0 && test_commit A
 	) &&
 	git clone "file://$(pwd)/src-0" target-7 2>err-7 &&
-	! grep "fatal:" err-7 &&
+	test_grep ! "fatal:" err-7 &&
 	# There is no reason to insist they are bit-for-bit
 	# identical, but this test should suffice for now.
 	test_cmp target-6/.git/config target-7/.git/config
@@ -298,22 +298,22 @@ test_expect_success 'clone separate gitdir where target already exists' '
 	rm -rf dst &&
 	echo foo=bar >>realgitdir/config &&
 	test_must_fail git clone --separate-git-dir realgitdir src dst &&
-	grep foo=bar realgitdir/config
+	test_grep foo=bar realgitdir/config
 '
 
 test_expect_success 'clone --reference from original' '
 	git clone --shared --bare src src-1 &&
 	git clone --bare src src-2 &&
 	git clone --reference=src-2 --bare src-1 target-8 &&
-	grep /src-2/ target-8/objects/info/alternates
+	test_grep /src-2/ target-8/objects/info/alternates
 '
 
 test_expect_success 'clone with more than one --reference' '
 	git clone --bare src src-3 &&
 	git clone --bare src src-4 &&
 	git clone --reference=src-3 --reference=src-4 src target-9 &&
-	grep /src-3/ target-9/.git/objects/info/alternates &&
-	grep /src-4/ target-9/.git/objects/info/alternates
+	test_grep /src-3/ target-9/.git/objects/info/alternates &&
+	test_grep /src-4/ target-9/.git/objects/info/alternates
 '
 
 test_expect_success 'clone from original with relative alternate' '
@@ -321,7 +321,7 @@ test_expect_success 'clone from original with relative alternate' '
 	git clone --bare src nest/src-5 &&
 	echo ../../../src/.git/objects >nest/src-5/objects/info/alternates &&
 	git clone --bare nest/src-5 target-10 &&
-	grep /src/\\.git/objects target-10/objects/info/alternates
+	test_grep /src/\\.git/objects target-10/objects/info/alternates
 '
 
 test_expect_success 'clone checking out a tag' '
@@ -530,19 +530,30 @@ do
 	'
 done
 
+# Parsing of paths that look like IPv6 addresses is broken on Cygwin.
+expectation_for_ipv6_tests=success
+if test_have_prereq CYGWIN
+then
+	expectation_for_ipv6_tests=failure
+fi
+
 #ipv6
 for repo in rep rep/home/project 123
 do
-	test_expect_success "clone [::1]:$repo" '
+	test_expect_$expectation_for_ipv6_tests "clone [::1]:$repo" '
 		test_clone_url [::1]:$repo ::1 "$repo"
 	'
 done
-#home directory
-test_expect_success "clone host:/~repo" '
+
+# Home directory. All tests that use "~repo" are broken in our CI job when the
+# leak sanitizer is enabled. It seems like either a bug in the sanitizer or in
+# glibc, but when executing getpwnam(3p) with an invalid username we eventually
+# start recursing in a call to free(3p), until bust the stack and segfault.
+test_expect_success !SANITIZE_LEAK "clone host:/~repo" '
 	test_clone_url host:/~repo host "~repo"
 '
 
-test_expect_success "clone [::1]:/~repo" '
+test_expect_$expectation_for_ipv6_tests !SANITIZE_LEAK "clone [::1]:/~repo" '
 	test_clone_url [::1]:/~repo ::1 "~repo"
 '
 
@@ -562,9 +573,9 @@ do
 		test_clone_url "ssh://host.xz$tcol/home/user/repo" host.xz /home/user/repo
 	'
 	# from home directory
-	test_expect_success "clone ssh://host.xz$tcol/~repo" '
-	test_clone_url "ssh://host.xz$tcol/~repo" host.xz "~repo"
-'
+	test_expect_success !SANITIZE_LEAK "clone ssh://host.xz$tcol/~repo" '
+		test_clone_url "ssh://host.xz$tcol/~repo" host.xz "~repo"
+	'
 done
 
 # with port number
@@ -573,7 +584,7 @@ test_expect_success 'clone ssh://host.xz:22/home/user/repo' '
 '
 
 # from home directory with port number
-test_expect_success 'clone ssh://host.xz:22/~repo' '
+test_expect_success !SANITIZE_LEAK 'clone ssh://host.xz:22/~repo' '
 	test_clone_url "ssh://host.xz:22/~repo" "-p 22 host.xz" "~repo"
 '
 
@@ -590,8 +601,8 @@ done
 for tuah in ::1 [::1] user@::1 user@[::1] [user@::1]
 do
 	euah=$(echo $tuah | tr -d "[]")
-	test_expect_success "clone ssh://$tuah/~repo" "
-	  test_clone_url ssh://$tuah/~repo $euah '~repo'
+	test_expect_success !SANITIZE_LEAK "clone ssh://$tuah/~repo" "
+		test_clone_url ssh://$tuah/~repo $euah '~repo'
 	"
 done
 
@@ -608,8 +619,8 @@ done
 for tuah in [::1] user@[::1] [user@::1]
 do
 	euah=$(echo $tuah | tr -d "[]")
-	test_expect_success "clone ssh://$tuah:22/~repo" "
-	  test_clone_url ssh://$tuah:22/~repo '-p 22' $euah '~repo'
+	test_expect_success !SANITIZE_LEAK "clone ssh://$tuah:22/~repo" "
+		  test_clone_url ssh://$tuah:22/~repo '-p 22' $euah '~repo'
 	"
 done
 
@@ -638,7 +649,7 @@ test_expect_success 'GIT_TRACE_PACKFILE produces a usable pack' '
 	git -C replay.git index-pack -v --stdin <tmp.pack
 '
 
-test_expect_success 'clone on case-insensitive fs' '
+test_expect_success PERL_TEST_HELPERS 'clone on case-insensitive fs' '
 	git init icasefs &&
 	(
 		cd icasefs &&
@@ -651,9 +662,9 @@ test_expect_success 'clone on case-insensitive fs' '
 	)
 '
 
-test_expect_success CASE_INSENSITIVE_FS 'colliding file detection' '
-	grep X icasefs/warning &&
-	grep x icasefs/warning &&
+test_expect_success PERL_TEST_HELPERS,CASE_INSENSITIVE_FS 'colliding file detection' '
+	test_grep X icasefs/warning &&
+	test_grep x icasefs/warning &&
 	test_grep "the following paths have collided" icasefs/warning
 '
 
@@ -802,7 +813,9 @@ test_expect_success 'clone with includeIf' '
 	test_when_finished "rm -rf repo \"$HTTPD_DOCUMENT_ROOT_PATH/repo.git\"" &&
 	git clone --bare --no-local src "$HTTPD_DOCUMENT_ROOT_PATH/repo.git" &&
 
-	test_when_finished "rm \"$HOME\"/.gitconfig" &&
+	test_when_finished "cp \"$HOME\"/.gitconfig.bak \
+		\"$HOME\"/.gitconfig 2>/dev/null || rm -f \"$HOME\"/.gitconfig" &&
+	cp "$HOME"/.gitconfig "$HOME"/.gitconfig.bak 2>/dev/null &&
 	cat >"$HOME"/.gitconfig <<-EOF &&
 	[includeIf "onbranch:something"]
 		path = /does/not/exist.inc
@@ -844,7 +857,7 @@ test_expect_success 'auto-discover bundle URI from HTTP clone' '
 	cat >pattern <<-EOF &&
 	"event":"child_start".*"argv":\["git-remote-https","$HTTPD_URL/everything.bundle"\]
 	EOF
-	grep -f pattern trace.txt
+	test_grep -f pattern trace.txt
 '
 
 test_expect_success 'auto-discover multiple bundles from HTTP clone' '
@@ -875,11 +888,11 @@ test_expect_success 'auto-discover multiple bundles from HTTP clone' '
 	cat >pattern <<-EOF &&
 	"event":"child_start".*"argv":\["git-remote-https","$HTTPD_URL/everything.bundle"\]
 	EOF
-	grep -f pattern trace.txt &&
+	test_grep -f pattern trace.txt &&
 	cat >pattern <<-EOF &&
 	"event":"child_start".*"argv":\["git-remote-https","$HTTPD_URL/new.bundle"\]
 	EOF
-	grep -f pattern trace.txt
+	test_grep -f pattern trace.txt
 '
 
 test_expect_success 'auto-discover multiple bundles from HTTP clone: creationToken heuristic' '

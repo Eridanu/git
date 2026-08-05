@@ -151,7 +151,7 @@ enum sparse_index_mode {
 
 	/*
 	 * The index has already been collapsed to sparse directories
-	 * whereever possible.
+	 * wherever possible.
 	 */
 	INDEX_COLLAPSED,
 
@@ -196,7 +196,7 @@ struct index_state {
  *
  * If the variable won't be used again, use release_index() to free()
  * its resources. If it needs to be used again use discard_index(),
- * which does the same thing, but will use use index_state_init() at
+ * which does the same thing, but will use index_state_init() at
  * the end. The discard_index() will use its own "istate->repo" as the
  * "r" argument to index_state_init() in that case.
  */
@@ -309,6 +309,7 @@ int write_locked_index(struct index_state *, struct lock_file *lock, unsigned fl
 void discard_index(struct index_state *);
 void move_index_extensions(struct index_state *dst, struct index_state *src);
 int unmerged_index(const struct index_state *);
+int index_state_unmerged_to_stage0(struct index_state *istate);
 
 /**
  * Returns 1 if istate differs from tree, 0 otherwise.  If tree is NULL,
@@ -481,7 +482,7 @@ int cmp_cache_name_compare(const void *a_, const void *b_);
 
 int add_files_to_cache(struct repository *repo, const char *prefix,
 		       const struct pathspec *pathspec, char *ps_matched,
-		       int include_sparse, int flags);
+		       int include_sparse, int flags, int ignored_too );
 
 void overlay_tree_on_index(struct index_state *istate,
 			   const char *tree_name, const char *prefix);

@@ -16,9 +16,8 @@ static void show_bit(size_t pos, void *data UNUSED)
 int cmd__dump_split_index(int ac UNUSED, const char **av)
 {
 	struct split_index *si;
-	int i;
 
-	setup_git_directory();
+	setup_git_directory(the_repository);
 
 	do_read_index(the_repository->index, av[1], 1);
 	printf("own %s\n", oid_to_hex(&the_repository->index->oid));
@@ -28,7 +27,7 @@ int cmd__dump_split_index(int ac UNUSED, const char **av)
 		return 0;
 	}
 	printf("base %s\n", oid_to_hex(&si->base_oid));
-	for (i = 0; i < the_repository->index->cache_nr; i++) {
+	for (size_t i = 0; i < the_repository->index->cache_nr; i++) {
 		struct cache_entry *ce = the_repository->index->cache[i];
 		printf("%06o %s %d\t%s\n", ce->ce_mode,
 		       oid_to_hex(&ce->oid), ce_stage(ce), ce->name);

@@ -4,7 +4,6 @@ test_description='test refspec written by clone-command'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -98,7 +97,7 @@ test_expect_success 'by default no tags will be kept updated' '
 test_expect_success 'clone with --no-tags' '
 	(
 		cd dir_all_no_tags &&
-		grep tagOpt .git/config &&
+		test_grep tagOpt .git/config &&
 		git fetch &&
 		git for-each-ref refs/tags >../actual
 	) &&

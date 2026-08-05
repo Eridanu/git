@@ -5,7 +5,6 @@ test_description='read-tree -m -u checks working tree files'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-read-tree.sh
 
@@ -143,8 +142,8 @@ test_expect_success '3-way not overwriting local changes (our side)' '
 
 	echo >>file1 "local changes" &&
 	read_tree_u_must_succeed -m -u branch-point side-a side-b &&
-	grep "new line to be kept" file1 &&
-	grep "local changes" file1
+	test_grep "new line to be kept" file1 &&
+	test_grep "local changes" file1
 
 '
 
@@ -157,8 +156,8 @@ test_expect_success '3-way not overwriting local changes (their side)' '
 
 	echo >>file2 "local changes" &&
 	read_tree_u_must_fail -m -u branch-point side-a side-b &&
-	! grep "new line to be kept" file2 &&
-	grep "local changes" file2
+	test_grep ! "new line to be kept" file2 &&
+	test_grep "local changes" file2
 
 '
 

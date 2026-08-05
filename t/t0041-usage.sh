@@ -5,7 +5,6 @@ test_description='Test commands behavior when given invalid argument value'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup ' '
@@ -14,7 +13,7 @@ test_expect_success 'setup ' '
 
 test_expect_success 'tag --contains <existent_tag>' '
 	git tag --contains "v1.0" >actual 2>actual.err &&
-	grep "v1.0" actual &&
+	test_grep "v1.0" actual &&
 	test_line_count = 0 actual.err
 '
 

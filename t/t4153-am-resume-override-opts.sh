@@ -2,7 +2,6 @@
 
 test_description='git-am command-line options override saved options'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 format_patch () {
@@ -99,7 +98,7 @@ test_expect_success '--reject overrides --no-reject' '
 	test_path_is_dir .git/rebase-apply &&
 	test_path_is_missing file.rej &&
 
-	test_must_fail git am --retry --reject </dev/zero &&
+	test_must_fail git am --retry --reject &&
 	test_path_is_dir .git/rebase-apply &&
 	test_path_is_file file.rej
 '

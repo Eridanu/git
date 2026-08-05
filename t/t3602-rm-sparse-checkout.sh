@@ -2,7 +2,6 @@
 
 test_description='git rm in sparse checked out working trees'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' "
@@ -21,7 +20,7 @@ test_expect_success 'setup' "
 	hint: If you intend to update such entries, try one of the following:
 	hint: * Use the --sparse option.
 	hint: * Disable or modify the sparsity rules.
-	hint: Disable this message with \"git config advice.updateSparsePath false\"
+	hint: Disable this message with \"git config set advice.updateSparsePath false\"
 	EOF
 
 	echo b | cat sparse_error_header - >sparse_entry_b_error &&
@@ -80,8 +79,8 @@ test_expect_success 'do not advice about sparse entries when they do not match t
 	git reset --hard &&
 	git sparse-checkout set a &&
 	test_must_fail git rm nonexistent 2>stderr &&
-	grep "fatal: pathspec .nonexistent. did not match any files" stderr &&
-	! grep -F -f sparse_error_header stderr
+	test_grep "fatal: pathspec .nonexistent. did not match any files" stderr &&
+	test_grep ! -F -f sparse_error_header stderr
 '
 
 test_expect_success 'do not warn about sparse entries when pathspec matches dense entries' '

@@ -2,11 +2,9 @@
 
 test_description='git apply with too-large patch'
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success EXPENSIVE 'git apply rejects patches that are too large' '
-	sz=$((1024 * 1024 * 1023)) &&
 	{
 		cat <<-\EOF &&
 		diff --git a/file b/file
@@ -15,9 +13,9 @@ test_expect_success EXPENSIVE 'git apply rejects patches that are too large' '
 		+++ b/file
 		@@ -0,0 +1 @@
 		EOF
-		test-tool genzeros
-	} | test_copy_bytes $sz | test_must_fail git apply 2>err &&
-	grep "patch too large" err
+		test-tool genzeros $((1024 * 1024 * 1023))
+	} | test_must_fail git apply 2>err &&
+	test_grep "patch too large" err
 '
 
 test_done

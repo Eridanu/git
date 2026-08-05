@@ -1,4 +1,5 @@
 #define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
 
 #include "git-compat-util.h"
 #include "advice.h"
@@ -25,7 +26,7 @@
 #include "symlinks.h"
 #include "trace2.h"
 #include "fsmonitor.h"
-#include "object-store-ll.h"
+#include "odb.h"
 #include "promisor-remote.h"
 #include "entry.h"
 #include "parallel-checkout.h"
@@ -210,6 +211,7 @@ void clear_unpack_trees_porcelain(struct unpack_trees_options *opts)
 {
 	strvec_clear(&opts->internal.msgs_to_free);
 	memset(opts->internal.msgs, 0, sizeof(opts->internal.msgs));
+	discard_index(&opts->internal.result);
 }
 
 static int do_add_entry(struct unpack_trees_options *o, struct cache_entry *ce,
@@ -370,7 +372,8 @@ static struct progress *get_progress(struct unpack_trees_options *o,
 			total++;
 	}
 
-	return start_delayed_progress(_("Updating files"), total);
+	return start_delayed_progress(the_repository,
+				      _("Updating files"), total);
 }
 
 static void setup_collided_checkout_detection(struct checkout *state,
@@ -668,8 +671,10 @@ static struct cache_entry *next_cache_entry(struct unpack_trees_options *o)
 
 	while (pos < index->cache_nr) {
 		struct cache_entry *ce = index->cache[pos];
-		if (!(ce->ce_flags & CE_UNPACKED))
+		if (!(ce->ce_flags & CE_UNPACKED)) {
+			o->internal.cache_bottom = pos;
 			return ce;
+		}
 		pos++;
 	}
 	return NULL;
@@ -807,6 +812,8 @@ static int traverse_by_cache_tree(int pos, int nr_entries, int nr_names,
 
 	if (!o->merge)
 		BUG("We need cache-tree to do this optimization");
+	if (nr_entries + pos > o->src_index->cache_nr)
+		return error(_("corrupted cache-tree has entries not present in index"));
 
 	/*
 	 * Do what unpack_callback() and unpack_single_entry() normally
@@ -1769,19 +1776,20 @@ static int clear_ce_flags(struct index_state *istate,
 	strbuf_reset(&prefix);
 	if (show_progress)
 		istate->progress = start_delayed_progress(
+					the_repository,
 					_("Updating index flags"),
 					istate->cache_nr);
 
 	xsnprintf(label, sizeof(label), "clear_ce_flags(0x%08lx,0x%08lx)",
 		  (unsigned long)select_mask, (unsigned long)clear_mask);
-	trace2_region_enter("unpack_trees", label, the_repository);
+	trace2_region_enter("unpack_trees", label, istate->repo);
 	rval = clear_ce_flags_1(istate,
 				istate->cache,
 				istate->cache_nr,
 				&prefix,
 				select_mask, clear_mask,
 				pl, 0, 0);
-	trace2_region_leave("unpack_trees", label, the_repository);
+	trace2_region_leave("unpack_trees", label, istate->repo);
 
 	stop_progress(&istate->progress);
 	return rval;
@@ -1876,12 +1884,13 @@ static int verify_absent(const struct cache_entry *,
  */
 int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options *o)
 {
-	struct repository *repo = the_repository;
+	struct repository *repo = o->src_index->repo;
 	int i, ret;
 	static struct cache_entry *dfc;
 	struct pattern_list pl;
 	int free_pattern_list = 0;
 	struct dir_struct dir = DIR_INIT;
+	struct repo_config_values *cfg = repo_config_values(the_repository);
 
 	if (o->reset == UNPACK_RESET_INVALID)
 		BUG("o->reset had a value of 1; should be UNPACK_TREES_*_UNTRACKED");
@@ -1896,7 +1905,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		BUG("o->df_conflict_entry is an output only field");
 
 	trace_performance_enter();
-	trace2_region_enter("unpack_trees", "unpack_trees", the_repository);
+	trace2_region_enter("unpack_trees", "unpack_trees", repo);
 
 	prepare_repo_settings(repo);
 	if (repo->settings.command_requires_full_index) {
@@ -1918,7 +1927,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	if (o->prefix)
 		update_sparsity_for_prefix(o->prefix, o->src_index);
 
-	if (!core_apply_sparse_checkout || !o->update)
+	if (!cfg->apply_sparse_checkout || !o->update)
 		o->skip_sparse_checkout = 1;
 	if (!o->skip_sparse_checkout) {
 		memset(&pl, 0, sizeof(pl));
@@ -2000,9 +2009,9 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		}
 
 		trace_performance_enter();
-		trace2_region_enter("unpack_trees", "traverse_trees", the_repository);
+		trace2_region_enter("unpack_trees", "traverse_trees", repo);
 		ret = traverse_trees(o->src_index, len, t, &info);
-		trace2_region_leave("unpack_trees", "traverse_trees", the_repository);
+		trace2_region_leave("unpack_trees", "traverse_trees", repo);
 		trace_performance_leave("traverse_trees");
 		if (ret < 0)
 			goto return_failed;
@@ -2069,9 +2078,13 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 	if (o->dst_index) {
 		move_index_extensions(&o->internal.result, o->src_index);
 		if (!ret) {
-			if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0))
-				cache_tree_verify(the_repository,
-						  &o->internal.result);
+			if (git_env_bool("GIT_TEST_CHECK_CACHE_TREE", 0) &&
+			    cache_tree_verify(the_repository,
+					      &o->internal.result) < 0) {
+				ret = -1;
+				goto done;
+			}
+
 			if (!o->skip_cache_tree_update &&
 			    !cache_tree_fully_valid(o->internal.result.cache_tree))
 				cache_tree_update(&o->internal.result,
@@ -2082,6 +2095,7 @@ int unpack_trees(unsigned len, struct tree_desc *t, struct unpack_trees_options 
 		o->internal.result.updated_workdir = 1;
 		discard_index(o->dst_index);
 		*o->dst_index = o->internal.result;
+		memset(&o->internal.result, 0, sizeof(o->internal.result));
 	} else {
 		discard_index(&o->internal.result);
 	}
@@ -2094,7 +2108,7 @@ done:
 		dir_clear(o->internal.dir);
 		o->internal.dir = NULL;
 	}
-	trace2_region_leave("unpack_trees", "unpack_trees", the_repository);
+	trace2_region_leave("unpack_trees", "unpack_trees", repo);
 	trace_performance_leave("unpack_trees");
 	return ret;
 
@@ -2416,7 +2430,7 @@ static int check_ok_to_remove(const char *name, int len, int dtype,
 	 *
 	 * Ignore that lstat() if it matches.
 	 */
-	if (ignore_case && icase_exists(o, name, len, st))
+	if (repo_ignore_case(the_repository) && icase_exists(o, name, len, st))
 		return 0;
 
 	if (o->internal.dir &&
@@ -2893,7 +2907,7 @@ int threeway_merge(const struct cache_entry * const *stages,
  * The rule is to "carry forward" what is in the index without losing
  * information across a "fast-forward", favoring a successful merge
  * over a merge failure when it makes sense.  For details of the
- * "carry forward" rule, please see <Documentation/git-read-tree.txt>.
+ * "carry forward" rule, please see <Documentation/git-read-tree.adoc>.
  *
  */
 int twoway_merge(const struct cache_entry * const *src,

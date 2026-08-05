@@ -4,7 +4,6 @@ test_description='check handling of .gitmodule path with dash'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success 'setup' '
@@ -30,7 +29,7 @@ test_expect_success 'fsck rejects unprotected dash' '
 	git init --bare dst &&
 	git -C dst config transfer.fsckObjects true &&
 	test_must_fail git push dst HEAD 2>err &&
-	grep gitmodulesPath err
+	test_grep gitmodulesPath err
 '
 
 test_expect_success MINGW 'submodule paths disallows trailing spaces' '

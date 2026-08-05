@@ -89,11 +89,18 @@ static int recvline(struct helper_data *helper, struct strbuf *buffer)
 	return recvline_fh(helper->out, buffer);
 }
 
-static void write_constant(int fd, const char *str)
+static int write_constant_gently(int fd, const char *str)
 {
 	if (debug)
 		fprintf(stderr, "Debug: Remote helper: -> %s", str);
 	if (write_in_full(fd, str, strlen(str)) < 0)
+		return -1;
+	return 0;
+}
+
+static void write_constant(int fd, const char *str)
+{
+	if (write_constant_gently(fd, str) < 0)
 		die_errno(_("full write to remote helper failed"));
 }
 
@@ -143,7 +150,7 @@ static struct child_process *get_helper(struct transport *transport)
 
 	if (have_git_dir())
 		strvec_pushf(&helper->env, "%s=%s",
-			     GIT_DIR_ENVIRONMENT, get_git_dir());
+			     GIT_DIR_ENVIRONMENT, repo_get_git_dir(the_repository));
 
 	helper->trace2_child_class = helper->args.v[0]; /* "remote-<name>" */
 
@@ -155,7 +162,7 @@ static struct child_process *get_helper(struct transport *transport)
 
 	data->helper = helper;
 	data->no_disconnect_req = 0;
-	refspec_init(&data->rs, REFSPEC_FETCH);
+	refspec_init_fetch(&data->rs, the_hash_algo);
 
 	/*
 	 * Open the output as FILE* so strbuf_getline_*() family of
@@ -168,13 +175,16 @@ static struct child_process *get_helper(struct transport *transport)
 		die_errno(_("can't dup helper output fd"));
 	data->out = xfdopen(duped, "r");
 
-	write_constant(helper->in, "capabilities\n");
+	sigchain_push(SIGPIPE, SIG_IGN);
+	if (write_constant_gently(helper->in, "capabilities\n") < 0)
+		die("remote helper '%s' aborted session", data->name);
+	sigchain_pop(SIGPIPE);
 
 	while (1) {
 		const char *capname, *arg;
 		int mandatory = 0;
 		if (recvline(data, &buf))
-			exit(128);
+			die("remote helper '%s' aborted session", data->name);
 
 		if (!*buf.buf)
 			break;
@@ -256,9 +266,9 @@ static int disconnect_helper(struct transport *transport)
 		close(data->helper->out);
 		fclose(data->out);
 		res = finish_command(data->helper);
-		FREE_AND_NULL(data->name);
 		FREE_AND_NULL(data->helper);
 	}
+	FREE_AND_NULL(data->name);
 	return res;
 }
 
@@ -303,9 +313,9 @@ static int string_list_set_helper_option(struct helper_data *data,
 					 struct string_list *list)
 {
 	struct strbuf buf = STRBUF_INIT;
-	int i, ret = 0;
+	int ret = 0;
 
-	for (i = 0; i < list->nr; i++) {
+	for (size_t i = 0; i < list->nr; i++) {
 		strbuf_addf(&buf, "option %s ", name);
 		quote_c_style(list->items[i].string, &buf, NULL, 0);
 		strbuf_addch(&buf, '\n');
@@ -323,7 +333,7 @@ static int set_helper_option(struct transport *transport,
 {
 	struct helper_data *data = transport->data;
 	struct strbuf buf = STRBUF_INIT;
-	int i, ret, is_bool = 0;
+	int ret, is_bool = 0;
 
 	get_helper(transport);
 
@@ -334,12 +344,12 @@ static int set_helper_option(struct transport *transport,
 		return string_list_set_helper_option(data, name,
 						     (struct string_list *)value);
 
-	for (i = 0; i < ARRAY_SIZE(unsupported_options); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(unsupported_options); i++) {
 		if (!strcmp(name, unsupported_options[i]))
 			return 1;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(boolean_options); i++) {
+	for (size_t i = 0; i < ARRAY_SIZE(boolean_options); i++) {
 		if (!strcmp(name, boolean_options[i])) {
 			is_bool = 1;
 			break;
@@ -389,6 +399,8 @@ static int release_helper(struct transport *transport)
 	int res = 0;
 	struct helper_data *data = transport->data;
 	refspec_clear(&data->rs);
+	free(data->import_marks);
+	free(data->export_marks);
 	res = disconnect_helper(transport);
 	free(transport->data);
 	return res;
@@ -438,7 +450,7 @@ static int fetch_with_fetch(struct transport *transport,
 	}
 	strbuf_release(&buf);
 
-	reprepare_packed_git(the_repository);
+	odb_reprepare(the_repository->objects);
 	return 0;
 }
 
@@ -469,7 +481,6 @@ static int get_exporter(struct transport *transport,
 {
 	struct helper_data *data = transport->data;
 	struct child_process *helper = get_helper(transport);
-	int i;
 
 	child_process_init(fastexport);
 
@@ -485,7 +496,7 @@ static int get_exporter(struct transport *transport,
 	if (data->import_marks)
 		strvec_pushf(&fastexport->args, "--import-marks=%s", data->import_marks);
 
-	for (i = 0; i < revlist_args->nr; i++)
+	for (size_t i = 0; i < revlist_args->nr; i++)
 		strvec_push(&fastexport->args, revlist_args->items[i].string);
 
 	fastexport->git_cmd = 1;
@@ -609,8 +620,22 @@ static int run_connect(struct transport *transport, struct strbuf *cmdbuf)
 	return ret;
 }
 
+static const char *connect_service_cmd(enum git_connect_service service)
+{
+	switch (service) {
+	case GIT_CONNECT_UPLOAD_PACK:
+		return "git-upload-pack";
+	case GIT_CONNECT_RECEIVE_PACK:
+		return "git-receive-pack";
+	case GIT_CONNECT_UPLOAD_ARCHIVE:
+		return "git-upload-archive";
+	}
+	BUG("unknown git_connect_service: %d", service);
+}
+
 static int process_connect_service(struct transport *transport,
-				   const char *name, const char *exec)
+				   enum git_connect_service service,
+				   const char *exec)
 {
 	struct helper_data *data = transport->data;
 	struct strbuf cmdbuf = STRBUF_INIT;
@@ -620,7 +645,7 @@ static int process_connect_service(struct transport *transport,
 	 * Handle --upload-pack and friends. This is fire and forget...
 	 * just warn if it fails.
 	 */
-	if (strcmp(name, exec)) {
+	if (strcmp(connect_service_cmd(service), exec)) {
 		int r = set_helper_option(transport, "servpath", exec);
 		if (r > 0)
 			warning(_("setting remote service path not supported by protocol"));
@@ -629,13 +654,15 @@ static int process_connect_service(struct transport *transport,
 	}
 
 	if (data->connect) {
-		strbuf_addf(&cmdbuf, "connect %s\n", name);
+		strbuf_addf(&cmdbuf, "connect %s\n",
+			    connect_service_cmd(service));
 		ret = run_connect(transport, &cmdbuf);
 	} else if (data->stateless_connect &&
 		   (get_protocol_version_config() == protocol_v2) &&
-		   (!strcmp("git-upload-pack", name) ||
-		    !strcmp("git-upload-archive", name))) {
-		strbuf_addf(&cmdbuf, "stateless-connect %s\n", name);
+		   (service == GIT_CONNECT_UPLOAD_PACK ||
+		    service == GIT_CONNECT_UPLOAD_ARCHIVE)) {
+		strbuf_addf(&cmdbuf, "stateless-connect %s\n",
+			    connect_service_cmd(service));
 		ret = run_connect(transport, &cmdbuf);
 		if (ret)
 			transport->stateless_rpc = 1;
@@ -649,32 +676,33 @@ static int process_connect(struct transport *transport,
 				     int for_push)
 {
 	struct helper_data *data = transport->data;
-	const char *name;
+	enum git_connect_service service;
 	const char *exec;
 	int ret;
 
-	name = for_push ? "git-receive-pack" : "git-upload-pack";
+	service = for_push ? GIT_CONNECT_RECEIVE_PACK : GIT_CONNECT_UPLOAD_PACK;
 	if (for_push)
 		exec = data->transport_options.receivepack;
 	else
 		exec = data->transport_options.uploadpack;
 
-	ret = process_connect_service(transport, name, exec);
+	ret = process_connect_service(transport, service, exec);
 	if (ret)
 		do_take_over(transport);
 	return ret;
 }
 
-static int connect_helper(struct transport *transport, const char *name,
-		   const char *exec, int fd[2])
+static int connect_helper(struct transport *transport, enum git_connect_service service,
+			  const char *exec, int fd[2])
 {
 	struct helper_data *data = transport->data;
 
 	/* Get_helper so connect is inited. */
 	get_helper(transport);
 
-	if (!process_connect_service(transport, name, exec))
-		die(_("can't connect to subservice %s"), name);
+	if (!process_connect_service(transport, service, exec))
+		die(_("can't connect to subservice %s"),
+		    connect_service_cmd(service));
 
 	fd[0] = data->helper->out;
 	fd[1] = data->helper->in;
@@ -707,8 +735,14 @@ static int fetch_refs(struct transport *transport,
 		return -1;
 	}
 
-	if (!data->get_refs_list_called)
-		get_refs_list_using_list(transport, 0);
+	if (!data->get_refs_list_called) {
+		/*
+		 * We do not care about the list of refs returned, but only
+		 * that the "list" command was sent.
+		 */
+		struct ref *dummy = get_refs_list_using_list(transport, 0);
+		free_refs(dummy);
+	}
 
 	count = 0;
 	for (i = 0; i < nr_heads; i++)
@@ -737,8 +771,9 @@ static int fetch_refs(struct transport *transport,
 		set_helper_option(transport, "filter", spec);
 	}
 
-	if (data->transport_options.negotiation_tips)
-		warning("Ignoring --negotiation-tip because the protocol does not support it.");
+	if (data->transport_options.negotiation_restrict_tips)
+		warning(_("ignoring %s because the protocol does not support it."),
+			"--negotiation-restrict");
 
 	if (data->fetch)
 		return fetch_with_fetch(transport, nr_heads, to_fetch);
@@ -747,6 +782,15 @@ static int fetch_refs(struct transport *transport,
 		return fetch_with_import(transport, nr_heads, to_fetch);
 
 	return -1;
+}
+
+static int fetch_object_info_helper(struct transport *transport)
+{
+	get_helper(transport);
+	if (process_connect(transport, 0))
+		return transport->vtable->fetch_object_info(transport);
+
+	die(_("object-info requires protocol v2"));
 }
 
 struct push_update_ref_state {
@@ -764,7 +808,8 @@ static int push_update_ref_status(struct strbuf *buf,
 
 	if (starts_with(buf->buf, "option ")) {
 		struct object_id old_oid, new_oid;
-		const char *key, *val;
+		char *key;
+		const char *val;
 		char *p;
 
 		if (!state->hint || !(state->report || state->new_report))
@@ -1013,6 +1058,7 @@ static int push_refs_with_push(struct transport *transport,
 			if (atomic) {
 				reject_atomic_push(remote_refs, mirror);
 				string_list_clear(&cas_options, 0);
+				strbuf_release(&buf);
 				return 0;
 			} else
 				continue;
@@ -1032,7 +1078,7 @@ static int push_refs_with_push(struct transport *transport,
 			if (ref->peer_ref)
 				strbuf_addstr(&buf, ref->peer_ref->name);
 			else
-				strbuf_addstr(&buf, oid_to_hex(&ref->new_oid));
+				strbuf_add_oid_hex(&buf, &ref->new_oid);
 		}
 		strbuf_addch(&buf, ':');
 		strbuf_addstr(&buf, ref->name);
@@ -1293,6 +1339,7 @@ static struct transport_vtable vtable = {
 	.get_refs_list	= get_refs_list,
 	.get_bundle_uri = get_bundle_uri,
 	.fetch_refs	= fetch_refs,
+	.fetch_object_info = fetch_object_info_helper,
 	.push_refs	= push_refs,
 	.connect	= connect_helper,
 	.disconnect	= release_helper
@@ -1324,24 +1371,18 @@ int transport_helper_init(struct transport *transport, const char *name)
 /* This should be enough to hold debugging message. */
 #define PBUFFERSIZE 8192
 
+static int transfer_debug_enabled = -1;
+
 /* Print bidirectional transfer loop debug message. */
 __attribute__((format (printf, 1, 2)))
 static void transfer_debug(const char *fmt, ...)
 {
-	/*
-	 * NEEDSWORK: This function is sometimes used from multiple threads, and
-	 * we end up using debug_enabled racily. That "should not matter" since
-	 * we always write the same value, but it's still wrong. This function
-	 * is listed in .tsan-suppressions for the time being.
-	 */
-
 	va_list args;
 	char msgbuf[PBUFFERSIZE];
-	static int debug_enabled = -1;
 
-	if (debug_enabled < 0)
-		debug_enabled = getenv("GIT_TRANSLOOP_DEBUG") ? 1 : 0;
-	if (!debug_enabled)
+	if (transfer_debug_enabled < 0)
+		BUG("somebody forgot to check GIT_TRANSLOOP_DEBUG!");
+	if (!transfer_debug_enabled)
 		return;
 
 	va_start(args, fmt);
@@ -1419,7 +1460,7 @@ static int udt_do_read(struct unidirectional_transfer *t)
 		transfer_debug("%s EOF (with %i bytes in buffer)",
 			t->src_name, (int)t->bufuse);
 		t->state = SSTATE_FLUSHING;
-	} else if (bytes > 0) {
+	} else {
 		t->bufuse += bytes;
 		transfer_debug("Read %i bytes from %s (buffer now at %i)",
 			(int)bytes, t->src_name, (int)t->bufuse);
@@ -1610,6 +1651,9 @@ static int tloop_spawnwait_tasks(struct bidirectional_transfer_state *s)
 int bidirectional_transfer_loop(int input, int output)
 {
 	struct bidirectional_transfer_state state;
+
+	if (transfer_debug_enabled < 0)
+		transfer_debug_enabled = getenv("GIT_TRANSLOOP_DEBUG") ? 1 : 0;
 
 	/* Fill the state fields. */
 	state.ptg.src = input;

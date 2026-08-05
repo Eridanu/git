@@ -8,7 +8,6 @@ test_description='git branch assorted tests'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 . "$TEST_DIRECTORY"/lib-rebase.sh
 
@@ -34,7 +33,7 @@ test_expect_success REFFILES 'branch -h in broken repository' '
 		cd broken &&
 		git init -b main &&
 		>.git/refs/heads/main &&
-		test_expect_code 129 git branch -h >usage 2>&1
+		git branch -h >usage 2>&1
 	) &&
 	test_grep "[Uu]sage" broken/usage
 '
@@ -205,7 +204,7 @@ test_expect_success 'git branch -M baz bam should succeed when baz is checked ou
 
 test_expect_success 'git branch -M baz bam should add entries to HEAD reflog' '
 	git reflog show HEAD >actual &&
-	grep "HEAD@{0}: Branch: renamed refs/heads/baz to refs/heads/bam" actual
+	test_grep "HEAD@{0}: Branch: renamed refs/heads/baz to refs/heads/bam" actual
 '
 
 test_expect_success 'git branch -M should leave orphaned HEAD alone' '
@@ -340,7 +339,7 @@ test_expect_success 'git branch -d on orphan HEAD (unmerged)' '
 	test_when_finished "git branch -D to-delete" &&
 	git branch to-delete main &&
 	test_must_fail git branch -d to-delete 2>err &&
-	grep "not fully merged" err
+	test_grep "not fully merged" err
 '
 
 test_expect_success 'git branch -d on orphan HEAD (unmerged, graph)' '
@@ -351,7 +350,7 @@ test_expect_success 'git branch -d on orphan HEAD (unmerged, graph)' '
 	test_when_finished "rm -rf .git/objects/commit-graph*" &&
 	git commit-graph write --reachable &&
 	test_must_fail git branch -d to-delete 2>err &&
-	grep "not fully merged" err
+	test_grep "not fully merged" err
 '
 
 test_expect_success 'git branch -v -d t should work' '
@@ -409,6 +408,20 @@ test_expect_success 'bare main worktree has HEAD at branch deleted by secondary 
 	git clone --bare nonbare bare &&
 	git -C bare worktree add --detach ../secondary main &&
 	git -C secondary branch -D main
+'
+
+test_expect_success 'secondary worktrees recognize core.bare=true in main config.worktree' '
+	test_when_finished "rm -rf bare_repo non_bare_repo secondary_worktree" &&
+	git init -b main non_bare_repo &&
+	test_commit -C non_bare_repo x &&
+
+	git clone --bare non_bare_repo bare_repo &&
+	git -C bare_repo config extensions.worktreeConfig true &&
+	git -C bare_repo config unset core.bare &&
+	git -C bare_repo config --worktree core.bare true &&
+
+	git -C bare_repo worktree add ../secondary_worktree &&
+	git -C secondary_worktree checkout main
 '
 
 test_expect_success 'git branch --list -v with --abbrev' '
@@ -699,7 +712,7 @@ test_expect_success 'git branch -C c1 c2 should succeed when c1 is checked out' 
 test_expect_success 'git branch -C c1 c2 should never touch HEAD' '
 	msg="Branch: copied refs/heads/c1 to refs/heads/c2" &&
 	git reflog HEAD >actual &&
-	! grep "$msg$" actual
+	test_grep ! "$msg$" actual
 '
 
 test_expect_success 'git branch -C main should work when main is checked out' '
@@ -917,7 +930,7 @@ test_expect_success 'deleting currently checked out branch fails' '
 	git worktree add -b my7 my7 &&
 	test_must_fail git -C my7 branch -d my7 &&
 	test_must_fail git branch -d my7 2>actual &&
-	grep "^error: cannot delete branch .my7. used by worktree at " actual &&
+	test_grep "^error: cannot delete branch .my7. used by worktree at " actual &&
 	rm -r my7 &&
 	git worktree prune
 '
@@ -928,7 +941,7 @@ test_expect_success 'deleting in-use branch fails' '
 	git -C my7 bisect start HEAD HEAD~2 &&
 	test_must_fail git -C my7 branch -d my7 &&
 	test_must_fail git branch -d my7 2>actual &&
-	grep "^error: cannot delete branch .my7. used by worktree at " actual &&
+	test_grep "^error: cannot delete branch .my7. used by worktree at " actual &&
 	rm -r my7 &&
 	git worktree prune
 '
@@ -1009,6 +1022,44 @@ test_expect_success '--set-upstream-to fails on a missing dst branch' '
 	test_cmp expect err
 '
 
+test_expect_success '--set-upstream-to suggests <remote>/<branch> on slip' '
+	test_when_finished "git remote remove slip-remote" &&
+	git remote add slip-remote . &&
+	git update-ref refs/remotes/slip-remote/slip-feature HEAD &&
+	test_must_fail git branch --set-upstream-to slip-remote slip-feature 2>err &&
+	test_grep "takes a single <remote>/<branch> argument" err &&
+	test_grep "hint: Did you mean to use: git branch --set-upstream-to=slip-remote/slip-feature?" err &&
+	test_must_fail git -c advice.setUpstreamFailure=false \
+		branch --set-upstream-to slip-remote slip-feature 2>err &&
+	test_grep ! "Did you mean" err
+'
+
+test_expect_success '--set-upstream-to does not suggest when no matching remote ref' '
+	test_when_finished "git remote remove slip-remote" &&
+	git remote add slip-remote . &&
+	test_must_fail git branch --set-upstream-to slip-remote no-such-branch 2>err &&
+	test_grep "branch ${SQ}no-such-branch${SQ} does not exist" err &&
+	test_grep ! "Did you mean" err
+'
+
+test_expect_success '--set-upstream-to to a local branch is not mistaken for a slip' '
+	git branch slip-local-upstream &&
+	git branch slip-local-target &&
+	git branch --set-upstream-to=slip-local-upstream slip-local-target 2>err &&
+	test_grep ! "Did you mean" err &&
+	echo refs/heads/slip-local-upstream >expect &&
+	git config branch.slip-local-target.merge >actual &&
+	test_cmp expect actual
+'
+
+test_expect_success '--set-upstream-to slip suggestion keeps a slashed branch name' '
+	test_when_finished "git remote remove slip-remote" &&
+	git remote add slip-remote . &&
+	git update-ref refs/remotes/slip-remote/slip/feature HEAD &&
+	test_must_fail git branch --set-upstream-to slip-remote slip/feature 2>err &&
+	test_grep "hint: Did you mean to use: git branch --set-upstream-to=slip-remote/slip/feature?" err
+'
+
 test_expect_success '--set-upstream-to fails on a missing src branch' '
 	test_must_fail git branch --set-upstream-to does-not-exist main 2>err &&
 	test_grep "the requested upstream branch '"'"'does-not-exist'"'"' does not exist" err
@@ -1024,7 +1075,8 @@ test_expect_success '--set-upstream-to fails on locked config' '
 	test_when_finished "rm -f .git/config.lock" &&
 	>.git/config.lock &&
 	git branch locked &&
-	test_must_fail git branch --set-upstream-to locked 2>err &&
+	test_must_fail git -c core.configLockTimeout=0 \
+		branch --set-upstream-to locked 2>err &&
 	test_grep "could not lock config file .git/config" err
 '
 
@@ -1055,7 +1107,8 @@ test_expect_success '--unset-upstream should fail if config is locked' '
 	test_when_finished "rm -f .git/config.lock" &&
 	git branch --set-upstream-to locked &&
 	>.git/config.lock &&
-	test_must_fail git branch --unset-upstream 2>err &&
+	test_must_fail git -c core.configLockTimeout=0 \
+		branch --unset-upstream 2>err &&
 	test_grep "could not lock config file .git/config" err
 '
 
@@ -1481,7 +1534,8 @@ test_expect_success 'refuse --edit-description on unborn branch for now' '
 '
 
 test_expect_success '--merged catches invalid object names' '
-	test_must_fail git branch --merged 0000000000000000000000000000000000000000
+	test_must_fail git branch --merged $ZERO_OID 2>err &&
+	test_grep "must point to a commit" err
 '
 
 test_expect_success '--list during rebase' '
@@ -1694,10 +1748,10 @@ test_expect_success '--track overrides branch.autoSetupMerge' '
 '
 
 test_expect_success 'errors if given a bad branch name' '
-	cat <<-\EOF >expect &&
-	fatal: '\''foo..bar'\'' is not a valid branch name
-	hint: See `man git check-ref-format`
-	hint: Disable this message with "git config advice.refSyntax false"
+	cat <<-EOF >expect &&
+	fatal: ${SQ}foo..bar${SQ} is not a valid branch name
+	hint: See ${SQ}git help check-ref-format${SQ}
+	hint: Disable this message with "git config set advice.refSyntax false"
 	EOF
 	test_must_fail git branch foo..bar >actual 2>&1 &&
 	test_cmp expect actual

@@ -7,7 +7,6 @@ test_description='Test the post-merge hook.'
 GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main
 export GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME
 
-TEST_PASSES_SANITIZE_LEAK=true
 . ./test-lib.sh
 
 test_expect_success setup '
@@ -47,7 +46,7 @@ test_expect_success 'post-merge runs as expected ' '
 '
 
 test_expect_success 'post-merge from normal merge receives the right argument ' '
-	grep 0 clone1/.git/post-merge.args
+	test_grep 0 clone1/.git/post-merge.args
 '
 
 test_expect_success 'post-merge from squash merge runs as expected ' '
@@ -56,7 +55,7 @@ test_expect_success 'post-merge from squash merge runs as expected ' '
 '
 
 test_expect_success 'post-merge from squash merge receives the right argument ' '
-	grep 1 clone2/.git/post-merge.args
+	test_grep 1 clone2/.git/post-merge.args
 '
 
 test_done
