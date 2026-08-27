@@ -1127,6 +1127,7 @@ static int run_git_commit(const char *defmsg,
 	struct child_process cmd = CHILD_PROCESS_INIT;
 
 	cmd.git_cmd = 1;
+	cmd.odb_to_close = the_repository->objects;
 
 	if (is_rebase_i(opts) &&
 	    ((opts->committer_date_is_author_date && !opts->ignore_date) ||
@@ -1926,6 +1927,13 @@ static int seen_squash(struct replay_ctx *ctx)
 		strstr(ctx->current_fixups.buf, "\nsquash");
 }
 
+/* Does the current fixup chain contain a "fixup -c" command? */
+static int seen_fixup_edit_msg(struct replay_ctx *ctx)
+{
+	return starts_with(ctx->current_fixups.buf, "fixup -c") ||
+		strstr(ctx->current_fixups.buf, "\nfixup -c");
+}
+
 static void update_comment_bufs(struct strbuf *buf1, struct strbuf *buf2, int n)
 {
 	strbuf_setlen(buf1, strlen(comment_line_str) + 1);
@@ -2148,9 +2156,14 @@ static int update_squash_messages(struct repository *r,
 	strbuf_release(&buf);
 
 	if (!res) {
-		strbuf_addf(&ctx->current_fixups, "%s%s %s",
+		const char *fixup_flag = "";
+
+		if (is_fixup_flag(command, flag) && (flag & TODO_EDIT_FIXUP_MSG))
+			fixup_flag = " -c";
+
+		strbuf_addf(&ctx->current_fixups, "%s%s%s %s",
 			    ctx->current_fixups.len ? "\n" : "",
-			    command_to_string(command),
+			    command_to_string(command), fixup_flag,
 			    oid_to_hex(&commit->object.oid));
 		res = write_message(ctx->current_fixups.buf,
 				    ctx->current_fixups.len,
@@ -3311,7 +3324,13 @@ static int read_populate_opts(struct replay_opts *opts)
 			const char *p = ctx->current_fixups.buf;
 			ctx->current_fixup_count = 1;
 			while ((p = strchr(p, '\n'))) {
-				ctx->current_fixup_count++;
+				/*
+				 * Older versions of git accidentally
+				 * inserted blank lines when a fixup
+				 * was skipped.
+				 */
+				if (p[1] && p[1] != '\n')
+					ctx->current_fixup_count++;
 				p++;
 			}
 		}
@@ -5406,6 +5425,9 @@ static int commit_staged_changes(struct repository *r,
 				BUG("Incorrect current_fixups:\n%s", p);
 			while (len && p[len - 1] != '\n')
 				len--;
+			/* Remove trailing newline */
+			if (len)
+				len--;
 			strbuf_setlen(&ctx->current_fixups, len);
 			if (write_message(p, len, rebase_path_current_fixups(),
 					  0) < 0) {
@@ -5434,8 +5456,8 @@ static int commit_staged_changes(struct repository *r,
 				 * message, no need to bother the user with
 				 * opening the commit message in the editor.
 				 */
-				if (!starts_with(p, "squash ") &&
-				    !strstr(p, "\nsquash "))
+				if (!seen_squash(ctx) &&
+				    !seen_fixup_edit_msg(ctx))
 					flags = (flags & ~EDIT_MSG) | CLEANUP_MSG;
 			} else if (is_fixup(peek_command(todo_list, 0))) {
 				/*
@@ -6256,7 +6278,6 @@ int sequencer_make_script(struct repository *r, struct strbuf *out,
 	revs.sort_order = REV_SORT_IN_GRAPH_ORDER;
 	revs.topo_order = 1;
 
-	revs.pretty_given = 1;
 	repo_config_get_string(the_repository, "rebase.instructionFormat", &format);
 	if (!format || !*format) {
 		free(format);

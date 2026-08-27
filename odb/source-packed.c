@@ -70,7 +70,7 @@ static int odb_source_packed_read_object_info(struct odb_source *source,
 	return 0;
 }
 
-static int odb_source_packed_read_object_stream(struct odb_read_stream **out,
+static int odb_source_packed_read_object_stream(struct odb_stream **out,
 						struct odb_source *source,
 						const struct object_id *oid)
 {
@@ -609,8 +609,7 @@ static int odb_source_packed_write_object(struct odb_source *source UNUSED,
 }
 
 static int odb_source_packed_write_object_stream(struct odb_source *source UNUSED,
-						 struct odb_write_stream *stream UNUSED,
-						 size_t len UNUSED,
+						 struct odb_stream *stream UNUSED,
 						 struct object_id *oid UNUSED)
 {
 	return error("packed backend cannot write object streams");
@@ -786,8 +785,7 @@ static void odb_source_packed_prepare(struct odb_source *source,
 	packed->initialized = true;
 }
 
-static void odb_source_packed_reparent(const char *name UNUSED,
-				       const char *old_cwd,
+static void odb_source_packed_reparent(const char *old_cwd,
 				       const char *new_cwd,
 				       void *cb_data)
 {
@@ -816,7 +814,7 @@ static void odb_source_packed_free(struct odb_source *source)
 {
 	struct odb_source_packed *packed = odb_source_packed_downcast(source);
 
-	chdir_notify_unregister(NULL, odb_source_packed_reparent, packed);
+	chdir_notify_unregister(odb_source_packed_reparent, packed);
 
 	for (struct packfile_list_entry *e = packed->packs.head; e; e = e->next)
 		free(e->pack);
@@ -853,7 +851,7 @@ struct odb_source_packed *odb_source_packed_new(struct object_database *odb,
 	packed->base.write_alternate = odb_source_packed_write_alternate;
 
 	if (!is_absolute_path(path))
-		chdir_notify_register(NULL, odb_source_packed_reparent, packed);
+		chdir_notify_register(odb_source_packed_reparent, packed);
 
 	return packed;
 }
